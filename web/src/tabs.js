@@ -1,5 +1,5 @@
 // web/src/tabs.js
-import { $, esc, S, doc_, api, LH, CHUNK, withKeys } from './state.js';
+import { $, esc, S, doc_, api, LH, CHUNK, withKeys, isMarkdownPath } from './state.js';
 import { vp, sizer, rowsEl, editor } from './ui.js';
 import { render, layout, refineChunk } from './renderer.js';
 import { updateStatus, setStatusNote, refreshMetrics } from './status.js';
@@ -13,12 +13,14 @@ import { clearFind } from './find.js';
 import { clearSelectAll } from './selbar.js';
 import { syncPreview, previewing, previewLine } from './markdown.js';
 import { syncDiffView, layoutPref } from './diff.js';
+import { openNote, syncNotesEditor, isNoteDoc, flushIfDirty } from './notesEditor.js';
 
 // Recently closed files, newest last, for Alt+Shift+T.
 const closedTabs = [];
 const MAX_CLOSED = 20;
 
 export async function openFile(path, opts = {}) {
+  if (S.meta?.notesMode && isMarkdownPath(path)) return openNote(path, opts);
   const { line, push = true, col } = opts;
   let idx = S.tabs.findIndex(t => t.path === path);
   if (idx < 0) {
@@ -108,7 +110,7 @@ export async function reloadOpenTabs() {
   if (S.tabs.length === 0) return;
 
   const activeDoc = doc_();
-  if (activeDoc) {
+  if (activeDoc && !isNoteDoc(activeDoc)) {
     activeDoc.scrollTop = vp.scrollTop;
     if (previewing(activeDoc)) {
       const mv = $('#mdview');
@@ -116,7 +118,10 @@ export async function reloadOpenTabs() {
     }
   }
 
-  const targets = S.tabs.map(t => ({
+  // Note tabs own their file while open: their in-memory buffer plus autosave
+  // is the sole source of truth, so a reindex must never refetch and clobber
+  // in-progress unsaved keystrokes. See docs/internals/file-reload-and-updates.md.
+  const targets = S.tabs.filter(t => !isNoteDoc(t)).map(t => ({
     oldDoc: t,
     path: t.path,
     anchor: t.cur || 1,
@@ -193,7 +198,7 @@ export async function reloadOpenTabs() {
   }
 
   const d = doc_();
-  if (d) {
+  if (d && !isNoteDoc(d)) {
     S.lsp.state = (d.lsp && d.lsp.state) || 'off';
     S.lsp.server = (d.lsp && d.lsp.server) || '';
     S.lsp.missing = (d.lsp && d.lsp.missing) || '';
@@ -219,6 +224,7 @@ export function centerLine(n) {
 
 export function closeTab(i) {
   clearSelectAll();
+  flushIfDirty(S.tabs[i]);
   const [closed] = S.tabs.splice(i, 1);
   if (closed) {
     if (closed.path) {
@@ -241,6 +247,7 @@ export function closeTab(i) {
     S.active = -1;
     syncPreview();
     syncDiffView();
+    syncNotesEditor();
     rowsEl.innerHTML = ''; sizer.style.height = '0px';
     $('#empty').hidden = false; drawCrumbs();
     drawTabs(); updateStatus();
@@ -250,6 +257,7 @@ export function closeTab(i) {
   const d = doc_();
   syncPreview();
   syncDiffView();
+  syncNotesEditor();
   drawTabs(); drawCrumbs(); layout();
   vp.scrollTop = d.scrollTop; render(); updateStatus();
 }
@@ -279,10 +287,12 @@ export function switchTab(i) {
   if (i === S.active || !S.tabs[i]) return;
   clearLink();
   const prev = doc_();
-  if (prev) prev.scrollTop = vp.scrollTop;
+  if (prev && !isNoteDoc(prev)) prev.scrollTop = vp.scrollTop;
+  flushIfDirty(prev);
   S.active = i;
   syncPreview();
   syncDiffView();
+  syncNotesEditor();
   clearFind();
   clearSelectAll();
   S.at = null;

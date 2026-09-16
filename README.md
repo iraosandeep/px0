@@ -147,6 +147,14 @@ docker run -p 7777:7777 -v $(pwd):/src px0:latest
 
 Access securely over Tailscale, WireGuard, reverse proxy, or Cloudflare Tunnel with zero remote setup overhead and strict read-only sandboxing (path traversal protection & DNS rebinding checks).
 
+### Notes Mode
+
+`px0 -notes <dir>` turns px0 into an Obsidian-style Markdown notes editor for that folder: the file tree shows only Markdown files (folders with none are hidden), and opening a note gives an editable surface that autosaves to disk on every keystroke — no save button, no manual step. This is the only mode in which px0 writes to disk; everything else remains strictly read-only.
+
+```bash
+px0 -notes ~/vault    # browse and edit only the Markdown files under ~/vault
+```
+
 ### Updating px0
 
 To check for updates and automatically upgrade `px0` to the latest release:
@@ -166,6 +174,7 @@ px0 --update
 | `-no-open`   | `false`     | Do not launch the web browser automatically                     |
 | `-no-lsp`    | `false`     | Disable language server discovery and use regex-based outline   |
 | `-no-git`    | `false`     | Disable git awareness (tree status badges and the diff view)    |
+| `-notes`     | `false`     | Notes mode: browse and edit only Markdown files, autosaving on every keystroke |
 | `-no-color`  | `false`     | Strip ANSI escape sequences from terminal output                |
 | `-quiet`     | `false`     | Suppress CLI narration (errors still print to stderr)           |
 | `-update`    | `false`     | Check for updates and install the latest version                |

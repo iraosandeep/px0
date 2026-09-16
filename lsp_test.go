@@ -109,7 +109,7 @@ func TestManagerDisabled(t *testing.T) {
 // Only paths a server actually named may be opened outside the indexed tree.
 func TestExternalAllowlist(t *testing.T) {
 	root := t.TempDir()
-	ix := NewIndex(root)
+	ix := NewIndex(root, false)
 	ix.Build()
 	m := newLSPManager(root, false)
 	s := NewServer(ix, m)

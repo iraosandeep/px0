@@ -16,6 +16,18 @@
   };
   var api = (path, params) => request("GET", path, params);
   var apiPost = (path, params) => request("POST", path, params);
+  var apiPostBody = async (path, params, body) => {
+    const u = new URL(path, location.origin);
+    for (const [k, v] of Object.entries(params || {}))
+      if (v !== undefined && v !== "")
+        u.searchParams.set(k, v);
+    const r = await fetch(u, { method: "POST", headers: { "Content-Type": "text/plain;charset=utf-8" }, body });
+    const j = await r.json();
+    if (j.error)
+      throw new Error(j.error);
+    return j;
+  };
+  var isMarkdownPath = (p) => /\.(md|markdown)$/i.test(p);
   var debounce = (fn, ms) => {
     let t;
     return (...a) => {
@@ -1989,6 +2001,99 @@
     });
   }
 
+  // web/src/notesEditor.js
+  var notePanel = $("#notesedit");
+  var noteText = $("#notesedit-text");
+  var noteStatusEl = $("#notesedit-status");
+  function isNoteDoc(d) {
+    return !!d && d.kind === "note";
+  }
+  async function openNote(path, opts = {}) {
+    const { push = true } = opts;
+    let idx = S2.tabs.findIndex((t) => t.path === path);
+    if (idx < 0) {
+      let text;
+      try {
+        const r = await fetch("/api/raw?path=" + encodeURIComponent(path));
+        if (!r.ok)
+          throw new Error("HTTP " + r.status);
+        text = await r.text();
+      } catch (e) {
+        setStatusNote(path + ": " + e.message);
+        return;
+      }
+      const d = {
+        path,
+        name: path.split("/").pop(),
+        kind: "note",
+        text,
+        markdown: true,
+        preview: false,
+        size: text.length,
+        dirty: false,
+        saveSeq: 0,
+        scrollTop: 0,
+        selStart: 0,
+        selEnd: 0
+      };
+      S2.tabs.push(d);
+      idx = S2.tabs.length - 1;
+    }
+    const prev = doc_();
+    if (prev && prev !== S2.tabs[idx])
+      flushIfDirty(prev);
+    S2.active = idx;
+    $("#empty").hidden = true;
+    syncPreview();
+    syncNotesEditor();
+    drawTabs();
+    drawCrumbs();
+    updateStatus();
+    if (push)
+      pushHistory(path, 1);
+  }
+  function syncNotesEditor() {
+    const d = doc_();
+    const want = isNoteDoc(d) && !previewing(d) ? d : null;
+    if (notePanel)
+      notePanel.hidden = !want;
+    if (!want)
+      return;
+    if (noteText.dataset.path !== want.path) {
+      noteText.value = want.text;
+      noteText.dataset.path = want.path;
+      noteText.scrollTop = want.scrollTop || 0;
+      if (want.selStart != null)
+        noteText.setSelectionRange(want.selStart, want.selEnd);
+    }
+    setSaveStatus(want.dirty ? "saving" : "saved");
+  }
+  var scheduleSave = debounce((d) => saveNote(d), 500);
+  async function saveNote(d) {
+    const mySeq = ++d.saveSeq;
+    try {
+      const res = await apiPostBody("/api/save", { path: d.path }, d.text);
+      if (mySeq !== d.saveSeq)
+        return;
+      d.dirty = false;
+      d.mtime = res.mtime;
+      if (doc_() === d)
+        setSaveStatus("saved");
+    } catch (e) {
+      if (doc_() === d)
+        setSaveStatus("error", e.message);
+    }
+  }
+  function flushIfDirty(d) {
+    if (isNoteDoc(d) && d.dirty)
+      return saveNote(d);
+  }
+  function setSaveStatus(state, detail) {
+    if (!noteStatusEl)
+      return;
+    noteStatusEl.textContent = state === "saved" ? "Saved" : state === "saving" ? "Saving…" : "Save failed: " + detail;
+  }
+
   // web/src/markdown.js
   var mdview = $("#mdview");
   var mdArticle = $("#md");
@@ -1996,7 +2101,9 @@
   var mdDrawn = null;
   var mdGen = 0;
   function previewing(d = doc_()) {
-    return !!(d && d.markdown && S2.mdPreview && !d.mdError && !d.diffMode);
+    if (!d || !d.markdown || d.mdError || d.diffMode)
+      return false;
+    return isNoteDoc(d) ? !!d.preview : S2.mdPreview;
   }
   function syncPreview() {
     const d = doc_();
@@ -2023,6 +2130,7 @@
         if (gen === mdGen && mdShown === d) {
           showToast("!", "No preview for " + d.name + ": " + e.message);
           syncPreview();
+          syncNotesEditor();
           updateStatus();
         }
         return;
@@ -2047,13 +2155,34 @@
     if (!findbar.hidden)
       runFind();
   }
-  function togglePreview() {
+  async function togglePreview() {
     const d = doc_();
     if (!d || !d.markdown) {
       showToast("!", "Preview works on Markdown files");
       return;
     }
     hideHover();
+    if (isNoteDoc(d)) {
+      if (previewing(d)) {
+        d.preview = false;
+        syncPreview();
+        syncNotesEditor();
+      } else {
+        await flushIfDirty(d);
+        d.mdError = "";
+        d.mdHtml = undefined;
+        d.mdReq = null;
+        d.preview = true;
+        syncPreview();
+        syncNotesEditor();
+      }
+      if (!findbar.hidden)
+        runFind();
+      else
+        S2.find = null;
+      updateStatus();
+      return;
+    }
     if (previewing(d)) {
       const line = mdDrawn === d ? previewTopLine() : 1;
       mdSetPref(false);
@@ -2938,6 +3067,8 @@
   var closedTabs = [];
   var MAX_CLOSED = 20;
   async function openFile(path, opts = {}) {
+    if (S2.meta?.notesMode && isMarkdownPath(path))
+      return openNote(path, opts);
     const { line, push = true, col } = opts;
     let idx = S2.tabs.findIndex((t) => t.path === path);
     if (idx < 0) {
@@ -3048,7 +3179,7 @@
     if (S2.tabs.length === 0)
       return;
     const activeDoc = doc_();
-    if (activeDoc) {
+    if (activeDoc && !isNoteDoc(activeDoc)) {
       activeDoc.scrollTop = vp.scrollTop;
       if (previewing(activeDoc)) {
         const mv = $("#mdview");
@@ -3056,7 +3187,7 @@
           activeDoc.mdScroll = mv.scrollTop;
       }
     }
-    const targets = S2.tabs.map((t) => ({
+    const targets = S2.tabs.filter((t) => !isNoteDoc(t)).map((t) => ({
       oldDoc: t,
       path: t.path,
       anchor: t.cur || 1,
@@ -3124,7 +3255,7 @@
       loadGutter(d2);
     }
     const d = doc_();
-    if (d) {
+    if (d && !isNoteDoc(d)) {
       S2.lsp.state = d.lsp && d.lsp.state || "off";
       S2.lsp.server = d.lsp && d.lsp.server || "";
       S2.lsp.missing = d.lsp && d.lsp.missing || "";
@@ -3151,6 +3282,7 @@
   }
   function closeTab(i) {
     clearSelectAll();
+    flushIfDirty(S2.tabs[i]);
     const [closed] = S2.tabs.splice(i, 1);
     if (closed) {
       if (closed.path) {
@@ -3170,6 +3302,7 @@
       S2.active = -1;
       syncPreview();
       syncDiffView();
+      syncNotesEditor();
       rowsEl.innerHTML = "";
       sizer.style.height = "0px";
       $("#empty").hidden = false;
@@ -3182,6 +3315,7 @@
     const d = doc_();
     syncPreview();
     syncDiffView();
+    syncNotesEditor();
     drawTabs();
     drawCrumbs();
     layout();
@@ -3214,11 +3348,13 @@
       return;
     clearLink();
     const prev = doc_();
-    if (prev)
+    if (prev && !isNoteDoc(prev))
       prev.scrollTop = vp.scrollTop;
+    flushIfDirty(prev);
     S2.active = i;
     syncPreview();
     syncDiffView();
+    syncNotesEditor();
     clearFind();
     clearSelectAll();
     S2.at = null;

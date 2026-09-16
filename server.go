@@ -60,6 +60,7 @@ func NewServer(ix *Index, lsp *lspManager) *Server {
 	s.mux.HandleFunc("/api/file", s.handleFile)
 	s.mux.HandleFunc("/api/close", s.handleClose)
 	s.mux.HandleFunc("/api/raw", s.handleRaw)
+	s.mux.HandleFunc("/api/save", s.handleSave)
 	s.mux.HandleFunc("/api/markdown", s.handleMarkdown)
 	s.mux.HandleFunc("/api/diff", s.handleDiff)
 	s.mux.HandleFunc("/api/gutter", s.handleGutter)
@@ -229,6 +230,7 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 		"lspServers": s.lsp.Available(),
 		"metrics":    getProcessMetrics(),
 		"version":    version,
+		"notesMode":  s.ix.NotesMode(),
 	})
 }
 
@@ -522,6 +524,50 @@ func (s *Server) handleRaw(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", ct)
 	}
 	http.ServeFile(w, r, abs)
+}
+
+// maxNoteBytes bounds a single autosave body. Generous for Markdown notes,
+// enough to make an accidental runaway paste/loop cheap to reject.
+const maxNoteBytes = 8 << 20
+
+// handleSave writes the POSTed body verbatim over an existing Markdown file.
+// This is the one sanctioned exception to px0's read-only design (see
+// docs/agents/README.md §1): it is reachable only in notes mode, only for
+// same-origin requests from localhost/an IP (localPost, guarding against CSRF
+// and DNS rebinding), and only for a path safePath resolves inside the
+// workspace root that also carries a Markdown extension.
+func (s *Server) handleSave(w http.ResponseWriter, r *http.Request) {
+	if !localPost(w, r) {
+		return
+	}
+	if !s.ix.NotesMode() {
+		fail(w, http.StatusForbidden, "saving requires notes mode (px0 -notes)")
+		return
+	}
+	abs, rel, ok := s.safePath(r.URL.Query().Get("path"))
+	if !ok {
+		fail(w, 400, "bad path")
+		return
+	}
+	if !isMarkdown(rel) {
+		fail(w, http.StatusForbidden, "only Markdown files can be saved")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxNoteBytes)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		fail(w, http.StatusRequestEntityTooLarge, "note too large")
+		return
+	}
+	if err := os.WriteFile(abs, body, 0644); err != nil {
+		fail(w, 500, err.Error())
+		return
+	}
+	var mtime int64
+	if st, err := os.Stat(abs); err == nil {
+		mtime = st.ModTime().UnixNano()
+	}
+	writeJSON(w, map[string]any{"ok": true, "path": rel, "size": len(body), "mtime": mtime})
 }
 
 // handleDiff returns the unified diff of a file against HEAD. available is false

@@ -108,7 +108,7 @@ func newTestServer(t *testing.T) (*Server, string) {
 	write("secret/keys.go", "package secret\n\nconst Token = \"nope\"\n")
 	write("sub/deep.py", "def handler(req):\n    return 1\n")
 
-	ix := NewIndex(root)
+	ix := NewIndex(root, false)
 	ix.Build()
 	return NewServer(ix, nil), root
 }
@@ -178,7 +178,7 @@ func TestTreeListsIgnoredEntries(t *testing.T) {
 	_, root := newTestServer(t)
 	os.MkdirAll(filepath.Join(root, ".git"), 0o755)
 	os.WriteFile(filepath.Join(root, ".git", "HEAD"), []byte("ref: refs/heads/main\n"), 0o644)
-	ix := NewIndex(root)
+	ix := NewIndex(root, false)
 	ix.Build()
 	s := NewServer(ix, nil)
 
@@ -299,7 +299,7 @@ func TestChunkedReadsCoverWholeFile(t *testing.T) {
 		sb.WriteString("\n")
 	}
 	os.WriteFile(filepath.Join(root, "big.go"), []byte(sb.String()), 0o644)
-	ix := NewIndex(root)
+	ix := NewIndex(root, false)
 	ix.Build()
 	s := NewServer(ix, nil)
 
@@ -431,7 +431,7 @@ func TestCaseInsensitiveOffsetsWithUnicode(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "u.go"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	ix := NewIndex(root)
+	ix := NewIndex(root, false)
 	ix.Build()
 	s := NewServer(ix, nil)
 
@@ -723,5 +723,177 @@ func TestMetaIncludesVersion(t *testing.T) {
 	v, ok := body["version"].(string)
 	if !ok || v != version {
 		t.Fatalf("expected version %q in /api/meta, got %v", version, body["version"])
+	}
+}
+
+func TestMetaExposesNotesMode(t *testing.T) {
+	s, _ := newTestServer(t) // built with NewIndex(root, false)
+	if _, body := get(t, s, "/api/meta"); body["notesMode"] != false {
+		t.Errorf("notesMode = %v, want false for a default-mode server", body["notesMode"])
+	}
+
+	root := t.TempDir()
+	os.WriteFile(filepath.Join(root, "note.md"), []byte("# hi\n"), 0o644)
+	ix := NewIndex(root, true)
+	ix.Build()
+	ns := NewServer(ix, nil)
+	if _, body := get(t, ns, "/api/meta"); body["notesMode"] != true {
+		t.Errorf("notesMode = %v, want true for a notes-mode server", body["notesMode"])
+	}
+}
+
+// newNotesVault builds a temp tree mixing Markdown and non-Markdown files at
+// several depths, including a directory with no Markdown anywhere beneath it,
+// and a gitignored directory that does contain a Markdown file.
+func newNotesVault(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	write := func(rel, body string) {
+		p := filepath.Join(root, filepath.FromSlash(rel))
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("journal/2024-01-01.md", "# Hello\n")
+	write("journal/nested/deep.md", "# Deep\n")
+	write("code/main.go", "package main\n")
+	write("empty-of-notes/only.go", "package main\n")
+	write(".gitignore", "vault-secret/\n")
+	write("vault-secret/hidden.md", "# Hidden\n")
+	return root
+}
+
+func TestNotesModeFiltersToMarkdown(t *testing.T) {
+	root := newNotesVault(t)
+	ix := NewIndex(root, true)
+	ix.Build()
+
+	top, ok := ix.Children("")
+	if !ok {
+		t.Fatal("root not indexed")
+	}
+	names := map[string]bool{}
+	for _, n := range top {
+		names[n.Name] = true
+	}
+	if !names["journal"] {
+		t.Errorf("root listing %v: missing journal (contains Markdown)", names)
+	}
+	if names["code"] || names["empty-of-notes"] {
+		t.Errorf("root listing %v: code/ and empty-of-notes/ contain no Markdown, should be pruned", names)
+	}
+
+	journal, ok := ix.Children("journal")
+	if !ok {
+		t.Fatal("journal not indexed")
+	}
+	var sawFile, sawNested bool
+	for _, n := range journal {
+		if n.Name == "2024-01-01.md" {
+			sawFile = true
+		}
+		if n.Name == "nested" {
+			sawNested = true
+		}
+	}
+	if !sawFile || !sawNested {
+		t.Errorf("journal listing = %+v, want 2024-01-01.md and nested/", journal)
+	}
+}
+
+func TestNotesModeDropsGitignoredEntirely(t *testing.T) {
+	root := newNotesVault(t)
+	ix := NewIndex(root, true)
+	ix.Build()
+
+	top, _ := ix.Children("")
+	for _, n := range top {
+		if n.Name == "vault-secret" {
+			t.Errorf("vault-secret/ is gitignored; notes mode should drop it outright, not list it: %+v", n)
+		}
+	}
+}
+
+func TestNotesModeFuzzyFindOnlyMarkdown(t *testing.T) {
+	root := newNotesVault(t)
+	ix := NewIndex(root, true)
+	ix.Build()
+
+	for _, f := range ix.Files() {
+		if !isMarkdown(f.Path) {
+			t.Errorf("indexed non-Markdown file in notes mode: %s", f.Path)
+		}
+	}
+}
+
+// postBody mirrors get() but issues a same-origin POST with a raw text body,
+// the shape /api/save and localPost expect.
+func postBody(t *testing.T, s *Server, url, body string) (int, map[string]any) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, url, strings.NewReader(body))
+	r.Host = "127.0.0.1:7777"
+	r.Header.Set("Origin", "http://127.0.0.1:7777")
+	s.ServeHTTP(rec, r)
+	var m map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &m)
+	return rec.Code, m
+}
+
+func newNotesServer(t *testing.T) (*Server, string) {
+	t.Helper()
+	root := newNotesVault(t)
+	ix := NewIndex(root, true)
+	ix.Build()
+	return NewServer(ix, nil), root
+}
+
+func TestSaveEndpointWritesFile(t *testing.T) {
+	s, root := newNotesServer(t)
+	code, body := postBody(t, s, "/api/save?path=journal/2024-01-01.md", "# updated\n")
+	if code != http.StatusOK || body["ok"] != true {
+		t.Fatalf("save: %d %v", code, body)
+	}
+	got, err := os.ReadFile(filepath.Join(root, "journal", "2024-01-01.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "# updated\n" {
+		t.Errorf("file on disk = %q, want %q", got, "# updated\n")
+	}
+}
+
+func TestSaveEndpointRejectsWithoutNotesMode(t *testing.T) {
+	s, _ := newTestServer(t) // NewIndex(root, false)
+	code, _ := postBody(t, s, "/api/save?path=main.go", "package main\n")
+	if code != http.StatusForbidden {
+		t.Errorf("save without notes mode = %d, want %d", code, http.StatusForbidden)
+	}
+}
+
+func TestSaveEndpointRejectsNonMarkdown(t *testing.T) {
+	s, _ := newNotesServer(t)
+	code, _ := postBody(t, s, "/api/save?path=code/main.go", "package main\n")
+	if code != http.StatusForbidden {
+		t.Errorf("save on non-Markdown path = %d, want %d", code, http.StatusForbidden)
+	}
+}
+
+func TestSaveEndpointRejectsPathTraversal(t *testing.T) {
+	s, _ := newNotesServer(t)
+	for _, bad := range []string{"../../../etc/passwd.md", "/etc/passwd.md"} {
+		code, body := postBody(t, s, "/api/save?path="+url.QueryEscape(bad), "x")
+		if code == http.StatusOK {
+			t.Errorf("save with path %q returned 200: %v", bad, body)
+		}
+	}
+}
+
+func TestSaveEndpointRequiresLocalPost(t *testing.T) {
+	s, _ := newNotesServer(t)
+	code, _ := get(t, s, "/api/save?path=journal/2024-01-01.md")
+	if code != http.StatusMethodNotAllowed {
+		t.Errorf("GET /api/save = %d, want %d", code, http.StatusMethodNotAllowed)
 	}
 }

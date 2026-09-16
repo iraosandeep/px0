@@ -93,6 +93,11 @@
       </div>
       <!-- Markdown preview: covers the code view for a Markdown tab (Alt+M toggles) -->
       <div id="mdview" hidden><article id="md" class="md"></article></div>
+      <!-- Notes mode (-notes): editable Markdown surface, autosaves on every keystroke -->
+      <div id="notesedit" hidden>
+        <textarea id="notesedit-text" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
+        <span id="notesedit-status" class="notes-save-status"></span>
+      </div>
       <!-- Diff view: covers the code view while a diff layout is active (Mod+D toggles) -->
       <div id="diffview" hidden><div id="diffcontent"></div></div>
       <div id="minimap-hits"></div>
