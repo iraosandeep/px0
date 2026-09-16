@@ -2093,6 +2093,39 @@
       return;
     noteStatusEl.textContent = state === "saved" ? "Saved" : state === "saving" ? "Saving…" : "Save failed: " + detail;
   }
+  function initNotesEditor() {
+    if (!noteText)
+      return;
+    noteText.addEventListener("input", () => {
+      const d = doc_();
+      if (!isNoteDoc(d))
+        return;
+      d.text = noteText.value;
+      d.size = d.text.length;
+      d.dirty = true;
+      setSaveStatus("saving");
+      updateStatus();
+      scheduleSave(d);
+    });
+    noteText.addEventListener("scroll", () => {
+      const d = doc_();
+      if (isNoteDoc(d))
+        d.scrollTop = noteText.scrollTop;
+    });
+    noteText.addEventListener("beforeinput", () => {
+      const d = doc_();
+      if (isNoteDoc(d)) {
+        d.selStart = noteText.selectionStart;
+        d.selEnd = noteText.selectionEnd;
+      }
+    });
+    window.addEventListener("beforeunload", () => {
+      const d = doc_();
+      if (isNoteDoc(d) && d.dirty) {
+        navigator.sendBeacon("/api/save?path=" + encodeURIComponent(d.path), d.text);
+      }
+    });
+  }
 
   // web/src/markdown.js
   var mdview = $("#mdview");
@@ -4075,6 +4108,7 @@
   initShortcuts();
   initMarkdown();
   initDiff();
+  initNotesEditor();
   initMetrics();
   initStatusFit();
   (async function boot() {
