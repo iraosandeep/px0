@@ -34,7 +34,8 @@ type Node struct {
 var vcsDirs = map[string]bool{".git": true, ".hg": true, ".svn": true}
 
 type Index struct {
-	root string
+	root  string
+	notes bool // restrict the tree to Markdown files/folders (notes mode)
 
 	mu       sync.RWMutex
 	files    []FileEntry
@@ -44,11 +45,13 @@ type Index struct {
 	readyCh  chan struct{}
 }
 
-func NewIndex(root string) *Index {
-	return &Index{root: root, children: map[string][]Node{}, readyCh: make(chan struct{})}
+func NewIndex(root string, notes bool) *Index {
+	return &Index{root: root, notes: notes, children: map[string][]Node{}, readyCh: make(chan struct{})}
 }
 
 func (ix *Index) Root() string { return ix.root }
+
+func (ix *Index) NotesMode() bool { return ix.notes }
 
 func (ix *Index) Ready() bool {
 	select {
@@ -157,6 +160,10 @@ func sortNodes(kids []Node) {
 // directory map (for the tree view). Root entries are published immediately so
 // the frontend can display the file tree without waiting for the full repo scan.
 func (ix *Index) Build() {
+	if ix.notes {
+		ix.buildNotes()
+		return
+	}
 	start := time.Now()
 	root := newIgnoreSet(nil)
 	root = root.child(readGitignore(ix.root, ""))
@@ -289,6 +296,130 @@ func (ix *Index) Build() {
 			}
 		}
 	}
+	ix.files, ix.children = files, children
+	ix.builtAt, ix.buildMS = time.Now(), time.Since(start).Milliseconds()
+	select {
+	case <-ix.readyCh:
+	default:
+		close(ix.readyCh)
+	}
+	ix.mu.Unlock()
+}
+
+// buildNotes walks the tree once, like Build, but keeps only Markdown files and
+// the directories that contain at least one of them anywhere in their subtree
+// (Obsidian-style vault view). Whether a folder survives depends on its whole
+// subtree, so this is necessarily bottom-up: a directory's kept children must be
+// known before the directory itself can be kept, which the streaming top-down
+// walk in Build cannot provide. Notes vaults are orders of magnitude smaller
+// than code repos, so a single-goroutine recursive walk (rather than Build's
+// worker-pool fan-out) keeps the pruning logic simple without a measurable cost.
+//
+// Entries matched by .gitignore are dropped outright rather than listed dimmed:
+// their contents are never walked, so whether one hides a Markdown file is
+// unknowable, and a notes vault has no use for non-note clutter either way.
+func (ix *Index) buildNotes() {
+	start := time.Now()
+	root := newIgnoreSet(nil)
+	root = root.child(readGitignore(ix.root, ""))
+
+	type rawEntry struct {
+		node     Node
+		children []rawEntry
+	}
+
+	var walk func(abs, rel string, ig *ignoreSet) []rawEntry
+	walk = func(abs, rel string, ig *ignoreSet) []rawEntry {
+		ents, err := os.ReadDir(abs)
+		if err != nil {
+			return nil
+		}
+		if rel != "" {
+			if extra := readGitignore(abs, rel); len(extra) > 0 {
+				ig = ig.child(extra)
+			}
+		}
+		var out []rawEntry
+		for _, e := range ents {
+			name := e.Name()
+			childRel := name
+			if rel != "" {
+				childRel = rel + "/" + name
+			}
+			isDir := e.IsDir()
+			if e.Type()&os.ModeSymlink != 0 {
+				continue
+			}
+			if ig.match(childRel, isDir) {
+				continue
+			}
+			if isDir {
+				kids := walk(filepath.Join(abs, name), childRel, ig)
+				if len(kids) == 0 {
+					continue // prune: no Markdown anywhere beneath it
+				}
+				out = append(out, rawEntry{node: Node{Name: name, Path: childRel, Dir: true}, children: kids})
+				continue
+			}
+			if !isMarkdown(childRel) {
+				continue
+			}
+			info, err := e.Info()
+			if err != nil {
+				continue
+			}
+			out = append(out, rawEntry{node: Node{Name: name, Path: childRel, Size: info.Size()}})
+		}
+		return out
+	}
+	top := walk(ix.root, "", root)
+
+	var files []FileEntry
+	children := map[string][]Node{}
+	var flatten func(rel string, ents []rawEntry)
+	flatten = func(rel string, ents []rawEntry) {
+		kids := make([]Node, len(ents))
+		for i, e := range ents {
+			kids[i] = e.node
+			if !e.node.Dir {
+				files = append(files, FileEntry{
+					Path: e.node.Path, Name: e.node.Name, Size: e.node.Size,
+					lower: strings.ToLower(e.node.Path), nameStart: len(e.node.Path) - len(e.node.Name),
+				})
+			}
+		}
+		sortNodes(kids)
+		children[rel] = kids
+		for _, e := range ents {
+			if e.node.Dir {
+				flatten(e.node.Path, e.children)
+			}
+		}
+	}
+	flatten("", top)
+	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
+
+	gs := gitStatus(ix.root)
+	dirtyDirs := map[string]bool{}
+	for p := range gs {
+		for i := strings.LastIndexByte(p, '/'); i >= 0; i = strings.LastIndexByte(p, '/') {
+			p = p[:i]
+			dirtyDirs[p] = true
+		}
+	}
+	if gs != nil {
+		for _, kids := range children {
+			for i := range kids {
+				if kids[i].Dir {
+					kids[i].Dirty = dirtyDirs[kids[i].Path]
+				} else if code, ok := gs[kids[i].Path]; ok {
+					kids[i].Status = code
+				}
+			}
+		}
+	}
+
+	ix.mu.Lock()
 	ix.files, ix.children = files, children
 	ix.builtAt, ix.buildMS = time.Now(), time.Since(start).Milliseconds()
 	select {

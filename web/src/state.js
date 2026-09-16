@@ -15,6 +15,19 @@ export const api = (path, params) => request('GET', path, params);
 // For requests that change the machine; the server only accepts these as POST from this page.
 export const apiPost = (path, params) => request('POST', path, params);
 
+// Like apiPost, but for a raw text payload (e.g. a note's full content) that
+// belongs in the request body rather than the query string.
+export const apiPostBody = async (path, params, body) => {
+  const u = new URL(path, location.origin);
+  for (const [k, v] of Object.entries(params || {})) if (v !== undefined && v !== '') u.searchParams.set(k, v);
+  const r = await fetch(u, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body });
+  const j = await r.json();
+  if (j.error) throw new Error(j.error);
+  return j;
+};
+
+export const isMarkdownPath = p => /\.(md|markdown)$/i.test(p);
+
 export const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 // navigator.platform is deprecated but is still the only signal some browsers give.
 export const isMac = /mac|iphone|ipad/i.test(navigator.userAgentData?.platform || navigator.platform || '');

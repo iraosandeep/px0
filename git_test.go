@@ -86,7 +86,7 @@ func TestGitStatus(t *testing.T) {
 	}
 
 	// Overlay onto tree nodes. Deleted/old-rename paths have no node on disk.
-	ix := NewIndex(root)
+	ix := NewIndex(root, false)
 	ix.Build()
 	byName := map[string]Node{}
 	kids, _ := ix.Children("")
@@ -120,7 +120,7 @@ func TestGitDiff(t *testing.T) {
 		t.Skip("git not installed")
 	}
 	root := gitRepo(t)
-	ix := NewIndex(root)
+	ix := NewIndex(root, false)
 	ix.Build()
 	s := NewServer(ix, nil)
 
@@ -163,7 +163,7 @@ func TestGitDisabled(t *testing.T) {
 	if st := gitStatus(root); st != nil {
 		t.Errorf("gitStatus returned %v with -no-git", st)
 	}
-	ix := NewIndex(root)
+	ix := NewIndex(root, false)
 	ix.Build()
 	kids, _ := ix.Children("sub")
 	for _, k := range kids {
@@ -219,7 +219,7 @@ func TestGitGutter(t *testing.T) {
 	write("f.go", "alpha\nBRAVO\ncharlie\ndelta\nNEWLINE1\necho\nfoxtrot\nhotel\nindia\njuliet\n")
 	write("untr.go", "new\n")
 
-	ix := NewIndex(root)
+	ix := NewIndex(root, false)
 	ix.Build()
 	s := NewServer(ix, nil)
 

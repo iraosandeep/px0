@@ -276,10 +276,15 @@ updateStatus();
 - **Problem**: If a file extension was replaced with an image or binary file, passing it to the text virtualization buffer would corrupt line array parsing.
 - **Solution**: `if (j.image) continue;` skips image tabs, allowing specialized image rendering flows to handle the media.
 
+### 7. Notes-Mode Tabs Are Excluded From Reload
+- **Problem**: Notes mode (`-notes`, see [notes-mode.md](notes-mode.md)) adds `POST /api/save`, an autosaving editor. Its writes change the same `mtime|size` the cache key above invalidates on. If a note tab were included in `reloadOpenTabs()`'s target list, a reindex firing mid-keystroke could refetch and overwrite the user's in-memory edit buffer with server-round-tripped content, racing the debounced autosave.
+- **Solution**: `reloadOpenTabs()`'s `targets` construction filters out note tabs entirely (`S.tabs.filter(t => !isNoteDoc(t))`, [`web/src/tabs.js`](../../web/src/tabs.js)). While a note is open, its in-memory buffer plus autosave is the sole source of truth for that file — it is simply never refetched. The pre-flight `vp.scrollTop`/`mdScroll` snapshotting above (Step 1) is likewise skipped for the active tab when it is a note, since that bookkeeping only applies to the virtualized `#viewport`/`#mdview` surfaces, not the plain `<textarea>` notes mode uses.
+
 ---
 
 ## 6. Related Documentation
 
+- [Notes Mode (`-notes`)](notes-mode.md) — the autosaving Markdown editor whose tabs this document's reload logic excludes.
 - [System Architecture & Runtime Lifecycle](architecture.md) — HTTP router, lifecycle, and proactive memory management.
 - [Editor Virtualization & Caret Engine](editor-virtualization.md) — Viewport virtualization, DOM recycling, and selection preservation.
 - [Git Awareness & Diffing](git-integration.md) — CLI shell-out git status generation and diff view synchronization.

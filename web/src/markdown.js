@@ -9,12 +9,19 @@ import { showPanel } from './panels.js';
 import { revealDir } from './tree.js';
 import { findbar, runFind } from './find.js';
 import { hideHover } from './hover.js';
+import { isNoteDoc, flushIfDirty, syncNotesEditor } from './notesEditor.js';
 
 /* Markdown tabs open rendered. The server converts the file with goldmark and
    passes raw HTML through, so nothing it returns is trusted: mdSanitize rebuilds
    it against an allowlist in an inert document before any of it reaches the page.
    Every block carries the source line it starts on (data-line), which keeps the
-   preview in step with line-based navigation and with the source view. */
+   preview in step with line-based navigation and with the source view.
+
+   Notes-mode tabs (isNoteDoc) share this same preview surface, but toggle a
+   per-doc d.preview flag instead of the global S.mdPreview: every note is a
+   Markdown tab, so a shared preference would force every note open the same
+   way, and a note's content changes as the user types, unlike a read-only
+   tab's static file. */
 
 export const mdview = $('#mdview');
 const mdArticle = $('#md');
@@ -24,7 +31,8 @@ let mdDrawn = null;  // doc whose HTML is in the article; drawing can wait on a 
 let mdGen = 0;
 
 export function previewing(d = doc_()) {
-  return !!(d && d.markdown && S.mdPreview && !d.mdError && !d.diffMode);
+  if (!d || !d.markdown || d.mdError || d.diffMode) return false;
+  return isNoteDoc(d) ? !!d.preview : S.mdPreview;
 }
 
 /* Show or hide the preview to match the active tab. Call whenever that changes. */
@@ -51,6 +59,7 @@ async function drawPreview(d) {
       if (gen === mdGen && mdShown === d) {
         showToast('!', 'No preview for ' + d.name + ': ' + e.message);
         syncPreview();
+        syncNotesEditor();
         updateStatus();
       }
       return;
@@ -71,10 +80,30 @@ async function drawPreview(d) {
   if (!findbar.hidden) runFind();
 }
 
-export function togglePreview() {
+export async function togglePreview() {
   const d = doc_();
   if (!d || !d.markdown) { showToast('!', 'Preview works on Markdown files'); return; }
   hideHover();
+  if (isNoteDoc(d)) {
+    if (previewing(d)) {
+      d.preview = false;
+      syncPreview();
+      syncNotesEditor();
+    } else {
+      // Preview must reflect what was actually typed, not whatever the last
+      // autosave wrote before this keystroke, so flush before fetching.
+      await flushIfDirty(d);
+      d.mdError = '';
+      d.mdHtml = undefined; // a note's content changes; never reuse a stale render
+      d.mdReq = null;
+      d.preview = true;
+      syncPreview();
+      syncNotesEditor();
+    }
+    if (!findbar.hidden) runFind(); else S.find = null;
+    updateStatus();
+    return;
+  }
   if (previewing(d)) {
     const line = mdDrawn === d ? previewTopLine() : 1;
     mdSetPref(false);

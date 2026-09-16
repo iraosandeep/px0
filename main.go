@@ -31,6 +31,7 @@ func main() {
 		noOpen       = flag.Bool("no-open", false, "do not launch a browser")
 		noLSP        = flag.Bool("no-lsp", false, "do not use language servers, even if installed")
 		noGit        = flag.Bool("no-git", false, "disable git awareness")
+		notes        = flag.Bool("notes", false, "notes mode: browse and edit only Markdown files, autosaving on every keystroke")
 		dev          = flag.String("dev", "", "serve the UI from this source directory instead of the embedded copy")
 		showVer      = flag.Bool("version", false, "print version and exit")
 		showVerShort = flag.Bool("v", false, "print version and exit (shorthand)")
@@ -88,7 +89,7 @@ func main() {
 		fatal(err)
 	}
 
-	ix := NewIndex(root)
+	ix := NewIndex(root, *notes)
 	lsp := newLSPManager(root, !*noLSP)
 	tel := NewTelemetryService(*noTelemetry)
 	defer tel.Close("normal")
